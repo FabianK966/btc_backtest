@@ -5,6 +5,7 @@ import mysql.connector
 from datetime import datetime
 import uuid
 
+# --- Logik-Funktionen ---
 def fetch_ohlcv(symbol="BTCUSDT", intervall="60", category="spot", days=730, progress_callback=None):
     base_url = "https://api.bybit.com/v5/market/kline"
     all_data = []
@@ -67,8 +68,9 @@ def run_backtest(df, session_start="15:30:00", session_end="22:00:00"):
             count_days += 1
             day_high = session_data["high"].max()
             day_low = session_data["low"].min()
-            touched_high = day_high >= prev_high
-            touched_low = day_low <= prev_low
+            session_close = session_data["close"].iloc[-1]  # Schlusskurs der letzten Kerze
+            touched_high = day_high >= prev_high and session_close >= prev_high
+            touched_low = day_low <= prev_low and session_close <= prev_low
             if touched_high or touched_low:
                 count_hits += 1
             records.append({
@@ -76,7 +78,8 @@ def run_backtest(df, session_start="15:30:00", session_end="22:00:00"):
                 "Touched High": touched_high,
                 "High Price": day_high,
                 "Touched Low": touched_low,
-                "Low Price": day_low
+                "Low Price": day_low,
+                "Close Price": session_close
             })
 
     return {
@@ -97,10 +100,9 @@ def save_results_to_db(records, symbol, intervall, category, session_start, sess
 
     backtest_id = str(uuid.uuid4())
 
-    # Tabelle für Metadaten erstellen
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS backtest_metadata (
-        backtest_id VARCHAR(8) PRIMARY KEY,
+        backtest_id VARCHAR(36) PRIMARY KEY,
         symbol VARCHAR(20),
         intervall VARCHAR(10),
         category VARCHAR(20),
@@ -115,21 +117,20 @@ def save_results_to_db(records, symbol, intervall, category, session_start, sess
     )
     """)
 
-    # Tabelle für tägliche Ergebnisse erstellen
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS backtest_daily_results (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        backtest_id VARCHAR(8),
+        backtest_id VARCHAR(36),
         date DATE,
         touched_high BOOLEAN,
         high_price DOUBLE,
         touched_low BOOLEAN,
         low_price DOUBLE,
+        close_price DOUBLE,
         FOREIGN KEY (backtest_id) REFERENCES backtest_metadata(backtest_id)
     )
     """)
 
-    # Metadaten speichern
     cursor.execute("""
     INSERT INTO backtest_metadata 
     (backtest_id, symbol, intervall, category, session_start, session_end, 
@@ -144,25 +145,25 @@ def save_results_to_db(records, symbol, intervall, category, session_start, sess
         session_end,
         result_stats["count_days"],
         result_stats["count_hits"],
-        result_stats["count_hits"] / result_stats["count_days"] * 100,
+        result_stats["count_hits"] / result_stats["count_days"] * 100 if result_stats["count_days"] > 0 else 0,
         result_stats["daily"].index[0].date(),
         result_stats["daily"].index[-1].date(),
         datetime.now()
     ))
 
-    # Tägliche Ergebnisse speichern
     for r in records:
         cursor.execute("""
         INSERT INTO backtest_daily_results 
-        (backtest_id, date, touched_high, high_price, touched_low, low_price)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        (backtest_id, date, touched_high, high_price, touched_low, low_price, close_price)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (
             backtest_id,
             r["Date"],
             bool(r["Touched High"]),
             float(r["High Price"]),
             bool(r["Touched Low"]),
-            float(r["Low Price"])
+            float(r["Low Price"]),
+            float(r["Close Price"])
         ))
 
     conn.commit()
